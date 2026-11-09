@@ -81,7 +81,43 @@
     .sources { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px dashed var(--line); color: var(--muted); font-size: 13px; }
     .sources li { margin: 4px 0; }
     .shots { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-    .shots img { max-width: min(360px, 100%); border: 1px solid var(--line); border-radius: 8px; background: white; }
+    .shot-hint { flex-basis: 100%; margin: 0; color: var(--muted); font-size: 12px; }
+    button.shot {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      cursor: zoom-in;
+      font: inherit;
+    }
+    button.shot img { display: block; max-width: min(360px, 100%); border: 1px solid var(--line); border-radius: 8px; background: white; }
+    #viewer {
+      border: 0;
+      padding: 12px;
+      margin: auto;
+      background: transparent;
+      max-width: none;
+      max-height: none;
+    }
+    #viewer::backdrop { background: rgba(29, 26, 22, 0.78); }
+    #viewer img {
+      display: block;
+      max-width: min(1080px, 92vw);
+      max-height: 84vh;
+      object-fit: contain;
+      background: white;
+      border-radius: 8px;
+    }
+    #viewer-close {
+      display: block;
+      margin: 0 0 8px auto;
+      border: 0;
+      border-radius: 999px;
+      padding: 4px 12px;
+      background: #fffdf8;
+      color: var(--ink);
+      font: inherit;
+      cursor: pointer;
+    }
     form {
       display: flex;
       gap: 8px;
@@ -137,6 +173,10 @@
     <span id="health">正在检查索引…</span>
     回答只依据已索引资料，不替代招标文件。
   </footer>
+  <dialog id="viewer" aria-label="截图大图">
+    <button type="button" id="viewer-close">关闭</button>
+    <img id="viewer-img" alt="手册截图大图" />
+  </dialog>
   <script>
     const examples = [
       "如何成为易派客平台会员？",
@@ -181,6 +221,25 @@
       log.innerHTML = "";
     });
 
+    let composing = false;
+    let ignoreEnter = false;
+    box.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+    box.addEventListener("compositionend", () => {
+      composing = false;
+      ignoreEnter = true;
+      requestAnimationFrame(() => {
+        ignoreEnter = false;
+      });
+    });
+    box.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey) return;
+      if (composing || event.isComposing || event.keyCode === 229 || ignoreEnter) return;
+      event.preventDefault();
+      form.requestSubmit();
+    });
+
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const message = box.value.trim();
@@ -205,9 +264,11 @@
           `<li>【${escapeHtml(item.id)}】${escapeHtml(item.title)}</li>`
         ).join("");
         const images = [...new Set((data.sources || []).flatMap((item) => item.images || []))];
-        const shots = images.map((src) => `<img alt="手册截图" src="${escapeHtml(src)}" />`).join("");
+        const shots = images.map((src) =>
+          `<button class="shot" type="button" aria-label="查看大图"><img alt="手册截图" src="${escapeHtml(src)}" /></button>`
+        ).join("");
         const sourceBlock = sources ? `<ol class="sources">${sources}</ol>` : "";
-        const shotBlock = shots ? `<div class="shots">${shots}</div>` : "";
+        const shotBlock = shots ? `<div class="shots"><p class="shot-hint">点击图片查看大图</p>${shots}</div>` : "";
         pending.classList.toggle("refused", data.refused);
         pending.innerHTML = `<div class="who">招标百问</div>${label}<div class="answer">${escapeHtml(data.answer)}</div>${shotBlock}${sourceBlock}`;
         history.push({ role: "user", content: message });
@@ -218,6 +279,20 @@
         send.disabled = false;
         box.focus();
       }
+    });
+
+    const viewer = document.querySelector("#viewer");
+    const viewerImg = document.querySelector("#viewer-img");
+    log.addEventListener("click", (event) => {
+      const shot = event.target.closest("button.shot");
+      const img = shot ? shot.querySelector("img") : null;
+      if (!img) return;
+      viewerImg.src = img.src;
+      viewer.showModal();
+    });
+    document.querySelector("#viewer-close").addEventListener("click", () => viewer.close());
+    viewer.addEventListener("click", (event) => {
+      if (event.target === viewer) viewer.close();
     });
 
     fetch("/api/health").then((res) => res.json()).then((data) => {

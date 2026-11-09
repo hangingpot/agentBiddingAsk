@@ -48,7 +48,13 @@ def create_app(
 
     def get_index() -> HybridIndex:
         if holder["index"] is None:
-            holder["index"] = build_index(settings.data_dir, settings.index_dir)
+            holder["index"] = build_index(
+                settings.data_dir,
+                settings.index_dir,
+                manuals_dir=settings.manuals_dir,
+                embedding_backend=settings.embedding_backend,
+                embedding_model=settings.embedding_model,
+            )
         return holder["index"]
 
     @app.get("/")
