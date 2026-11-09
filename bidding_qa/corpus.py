@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import logging
 import re
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -17,11 +16,16 @@ TEXT_SUFFIXES = {".txt", ".md", ".markdown"}
 JSON_SUFFIXES = {".json"}
 PDF_SUFFIXES = {".pdf"}
 DOCX_SUFFIXES = {".docx"}
+DOC_SUFFIXES = {".doc"}
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 ZIP_SUFFIXES = {".zip"}
-SUPPORTED = TEXT_SUFFIXES | JSON_SUFFIXES | PDF_SUFFIXES | DOCX_SUFFIXES | ZIP_SUFFIXES
+SUPPORTED = (
+    TEXT_SUFFIXES | JSON_SUFFIXES | PDF_SUFFIXES | DOCX_SUFFIXES | DOC_SUFFIXES | IMAGE_SUFFIXES | ZIP_SUFFIXES
+)
 
 MAX_TEXT_BYTES = 15 * 1024 * 1024
-MAX_ZIP_MEMBER = 30 * 1024 * 1024
+MAX_DOC_BYTES = 120 * 1024 * 1024
+MAX_ZIP_MEMBER = 80 * 1024 * 1024
 CHUNK_SIZE = 680
 CHUNK_OVERLAP = 120
 
@@ -37,6 +41,7 @@ class Chunk:
     source: str
     kind: str
     question: str = ""
+    images: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -51,33 +56,43 @@ class Chunk:
             source=data.get("source", ""),
             kind=data.get("kind", "doc"),
             question=data.get("question", ""),
+            images=list(data.get("images") or []),
         )
 
 
-def load_corpus(data_dir: Path) -> list[Chunk]:
-    """遍历 data_dir，解析支持的文件并去重。"""
+def load_corpus(
+    data_dir: Path,
+    extra_dirs: list[Path] | None = None,
+    assets_dir: Path | None = None,
+    ocr=None,
+) -> list[Chunk]:
+    """遍历语料目录。手册可以在 data/ 里，也可以在额外的 MANUALS_DIR。"""
     data_dir = Path(data_dir)
     if not data_dir.is_dir():
         raise FileNotFoundError(f"语料目录不存在：{data_dir}")
+    roots = _corpus_roots(data_dir, extra_dirs)
 
     raw: list[Chunk] = []
-    files = sorted(
-        path for path in data_dir.rglob("*") if path.is_file() and not _ignored(path, data_dir)
-    )
+    files: list[tuple[Path, Path]] = []
+    for root in roots:
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and not _ignored(path, root):
+                files.append((path, root))
     if not files:
         raise FileNotFoundError(f"{data_dir} 下没有可索引的文件")
 
-    for path in files:
+    for path, root in files:
         suffix = path.suffix.lower()
         try:
-            source = path.relative_to(data_dir.parent).as_posix()
+            source = path.resolve().relative_to(root.resolve()).as_posix()
+            source = f"{root.name}/{source}"
         except ValueError:
             source = path.name
         try:
             if suffix in ZIP_SUFFIXES:
-                raw.extend(_load_zip(path, source))
+                raw.extend(_load_zip(path, source, assets_dir, ocr))
             else:
-                raw.extend(_load_file(path, source))
+                raw.extend(_load_file(path, source, assets_dir, ocr))
         except Exception:
             logger.exception("跳过无法解析的文件 %s", path)
 
@@ -90,19 +105,46 @@ def load_corpus(data_dir: Path) -> list[Chunk]:
     return chunks
 
 
-def fingerprint(data_dir: Path) -> str:
+def fingerprint(data_dir: Path, extra_dirs: list[Path] | None = None) -> str:
     """用路径、大小、修改时间判断语料是否变化。"""
-    data_dir = Path(data_dir)
     rows: list[str] = []
-    if data_dir.is_dir():
-        for path in sorted(data_dir.rglob("*")):
-            if not path.is_file() or _ignored(path, data_dir):
+    for root in _corpus_roots(Path(data_dir), extra_dirs):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or _ignored(path, root):
                 continue
             stat = path.stat()
-            rel = path.relative_to(data_dir).as_posix()
-            rows.append(f"{rel}:{stat.st_size}:{stat.st_mtime_ns}")
+            rel = path.relative_to(root).as_posix()
+            rows.append(f"{root.resolve()}/{rel}:{stat.st_size}:{stat.st_mtime_ns}")
     digest = hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
     return digest
+
+
+def _corpus_roots(data_dir: Path, extra_dirs: list[Path] | None) -> list[Path]:
+    roots = [data_dir]
+    data_resolved = data_dir.resolve()
+    for extra in extra_dirs or []:
+        if extra is None:
+            continue
+        extra = Path(extra)
+        if not extra.is_dir():
+            continue
+        resolved = extra.resolve()
+        if resolved == data_resolved or _is_relative_to(resolved, data_resolved):
+            continue
+        if any(resolved == root.resolve() for root in roots):
+            continue
+        roots.append(extra)
+    return roots
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def _ignored(path: Path, data_dir: Path) -> bool:
@@ -117,16 +159,22 @@ def _ignored(path: Path, data_dir: Path) -> bool:
     return path.suffix.lower() not in SUPPORTED
 
 
-def _load_file(path: Path, source: str) -> list[Chunk]:
+def _load_file(path: Path, source: str, assets_dir: Path | None, ocr) -> list[Chunk]:
     suffix = path.suffix.lower()
-    if path.stat().st_size > MAX_TEXT_BYTES and suffix not in ZIP_SUFFIXES:
-        logger.warning("文件超过 %s 字节，已跳过：%s", MAX_TEXT_BYTES, path)
+    limit = MAX_DOC_BYTES if suffix in PDF_SUFFIXES | DOCX_SUFFIXES | DOC_SUFFIXES | IMAGE_SUFFIXES else MAX_TEXT_BYTES
+    if path.stat().st_size > limit:
+        logger.warning("文件超过 %s 字节，已跳过：%s", limit, path)
         return []
+    if suffix in PDF_SUFFIXES | DOCX_SUFFIXES | DOC_SUFFIXES | IMAGE_SUFFIXES:
+        from bidding_qa.documents import parse_path
+
+        text, images = parse_path(path, assets_dir, ocr=ocr)
+        return _chunks_from_prose(text, source, images)
     data = path.read_bytes()
-    return _chunks_from_bytes(data, suffix, source)
+    return _chunks_from_bytes(data, suffix, source, assets_dir, ocr)
 
 
-def _load_zip(path: Path, source: str) -> list[Chunk]:
+def _load_zip(path: Path, source: str, assets_dir: Path | None, ocr) -> list[Chunk]:
     chunks: list[Chunk] = []
     with zipfile.ZipFile(path) as archive:
         for info in archive.infolist():
@@ -144,11 +192,17 @@ def _load_zip(path: Path, source: str) -> list[Chunk]:
                 continue
             data = archive.read(info)
             member_source = f"{source}!{name}"
-            chunks.extend(_chunks_from_bytes(data, suffix, member_source))
+            chunks.extend(_chunks_from_bytes(data, suffix, member_source, assets_dir, ocr))
     return chunks
 
 
-def _chunks_from_bytes(data: bytes, suffix: str, source: str) -> list[Chunk]:
+def _chunks_from_bytes(
+    data: bytes,
+    suffix: str,
+    source: str,
+    assets_dir: Path | None = None,
+    ocr=None,
+) -> list[Chunk]:
     if suffix in JSON_SUFFIXES:
         text = _decode(data)
         return _chunks_from_json(text, source)
@@ -158,12 +212,11 @@ def _chunks_from_bytes(data: bytes, suffix: str, source: str) -> list[Chunk]:
         if faq:
             return [_faq_chunk(q, a, source) for q, a in faq]
         return _chunks_from_prose(text, source)
-    if suffix in PDF_SUFFIXES:
-        text = _read_pdf(data)
-        return _chunks_from_prose(text, source) if text.strip() else []
-    if suffix in DOCX_SUFFIXES:
-        text = _read_docx(data)
-        return _chunks_from_prose(text, source) if text.strip() else []
+    if suffix in PDF_SUFFIXES | DOCX_SUFFIXES | DOC_SUFFIXES | IMAGE_SUFFIXES:
+        from bidding_qa.documents import parse_bytes
+
+        text, images = parse_bytes(data, suffix, assets_dir, ocr=ocr, source_name=source)
+        return _chunks_from_prose(text, source, images)
     return []
 
 
@@ -294,63 +347,62 @@ def _faq_chunk(question: str, answer: str, source: str) -> Chunk:
     )
 
 
-def _chunks_from_prose(text: str, source: str) -> list[Chunk]:
+def _chunks_from_prose(text: str, source: str, images: list[str] | None = None) -> list[Chunk]:
     body = text.strip()
     if not body:
         return []
-    windows = _windows(body, CHUNK_SIZE, CHUNK_OVERLAP)
+    windows = _split_text(body)
     name = source.rsplit("/", 1)[-1]
     chunks: list[Chunk] = []
     total = len(windows)
+    known_images = list(images or [])
     for index, window in enumerate(windows, start=1):
-        heading = window.strip().splitlines()[0][:40]
+        window = window.strip()
+        if not window:
+            continue
+        heading = window.splitlines()[0][:40]
         title = f"{name} #{index}" if total > 1 else name
         if heading:
             title = f"{title} {heading}"
+        found = _image_refs(window)
+        chunk_images = found or (known_images if total == 1 else [])
         chunks.append(
             Chunk(
                 id="",
                 title=title[:80],
-                text=window.strip(),
-                search_text=window.strip(),
+                text=window,
+                search_text=window,
                 source=source,
                 kind="doc",
+                images=chunk_images,
             )
         )
     return chunks
 
 
-def _windows(text: str, size: int, overlap: int) -> list[str]:
-    text = text.strip()
-    if len(text) <= size:
+_IMAGE_REF = re.compile(r"/assets/[A-Za-z0-9._-]+")
+
+
+def _image_refs(text: str) -> list[str]:
+    seen: list[str] = []
+    for match in _IMAGE_REF.findall(text):
+        if match not in seen:
+            seen.append(match)
+    return seen
+
+
+def _split_text(text: str) -> list[str]:
+    if len(text) <= CHUNK_SIZE:
         return [text]
-    step = max(1, size - overlap)
-    windows: list[str] = []
-    start = 0
-    while start < len(text):
-        windows.append(text[start : start + size])
-        if start + size >= len(text):
-            break
-        start += step
-    return windows
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-
-def _read_pdf(data: bytes) -> str:
-    from pypdf import PdfReader
-
-    reader = PdfReader(io.BytesIO(data))
-    pages: list[str] = []
-    for page in reader.pages[:400]:
-        pages.append(page.extract_text() or "")
-    return "\n".join(pages)
-
-
-def _read_docx(data: bytes) -> str:
-    from docx import Document
-
-    document = Document(io.BytesIO(data))
-    parts = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
-    return "\n".join(parts)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=CHUNK_OVERLAP,
+        separators=["\n\n", "\n", "。", "；", "，", " ", ""],
+    )
+    parts = [part.strip() for part in splitter.split_text(text) if part.strip()]
+    return parts or [text]
 
 
 def _question_key(question: str) -> str:

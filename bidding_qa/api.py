@@ -7,12 +7,14 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bidding_qa.config import Settings, load_settings
 from bidding_qa.index_store import HybridIndex, build_index
 from bidding_qa.llm import LLMError, LLMNotConfigured
 from bidding_qa.pipeline import Answer, answer_question
+from bidding_qa.retriever import LocalHybridRetriever, document_public
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -40,6 +42,9 @@ def create_app(
     settings = settings or load_settings()
     app = FastAPI(title="招标百问", version="1.0.0")
     holder: dict = {"settings": settings, "index": index, "complete_fn": complete_fn}
+    assets = settings.index_dir / "assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
     def get_index() -> HybridIndex:
         if holder["index"] is None:
@@ -65,7 +70,7 @@ def create_app(
                 "detail": str(exc),
                 "llm_configured": settings.llm_configured,
                 "model": settings.model,
-                "embedding_backend": "local-hybrid-tfidf-bm25",
+                "embedding_backend": settings.embedding_backend,
             }
         return {
             "status": "ok",
@@ -73,13 +78,16 @@ def create_app(
             "llm_configured": settings.llm_configured,
             "model": settings.model,
             "base_url": settings.base_url,
-            "embedding_backend": "local-hybrid-tfidf-bm25",
+            "embedding_backend": settings.embedding_backend,
+            "embedding_model": settings.embedding_model,
+            "manuals_dir": str(settings.manuals_dir or ""),
         }
 
     @app.post("/api/retrieve")
     def retrieve(body: RetrieveRequest) -> dict:
-        hits = get_index().search(body.query, k=body.k)
-        return {"query": body.query, "hits": [hit.public() for hit in hits]}
+        retriever = LocalHybridRetriever(index=get_index(), k=body.k)
+        documents = retriever.invoke(body.query)
+        return {"query": body.query, "hits": [document_public(doc) for doc in documents]}
 
     @app.post("/api/chat")
     def chat(body: ChatRequest) -> dict:

@@ -35,20 +35,17 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     settings = load_settings()
-    if settings.embedding_backend != "local":
-        print(
-            f"当前只实现了 EMBEDDING_BACKEND=local，收到的是 {settings.embedding_backend}。"
-            "向量仍按本地混合索引构建。",
-            file=sys.stderr,
-        )
 
     if args.command == "ingest":
-        index = build_index(settings.data_dir, settings.index_dir, force=args.force)
+        index = _load_index(settings, force=args.force)
+        manuals = settings.manuals_dir or "未发现，可设置 MANUALS_DIR"
         print(f"索引完成，共 {len(index.chunks)} 条。目录：{settings.index_dir}")
+        print(f"手册目录：{manuals}")
+        print(f"嵌入：{settings.embedding_backend} {settings.embedding_model}")
         return 0
 
     if args.command == "retrieve":
-        index = build_index(settings.data_dir, settings.index_dir)
+        index = _load_index(settings)
         for hit in index.search(args.question, k=args.k):
             print(f"{hit.score:.3f}  tfidf={hit.tfidf:.3f}  bm25={hit.bm25:.3f}  title={hit.title_score:.3f}")
             print(f"  [{hit.chunk.id}] {hit.chunk.title}")
@@ -56,11 +53,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "ask":
-        index = build_index(settings.data_dir, settings.index_dir)
+        index = _load_index(settings)
         return _print_answer(args.question, [], index, settings)
 
     if args.command == "chat":
-        index = build_index(settings.data_dir, settings.index_dir)
+        index = _load_index(settings)
         return _chat(index, settings)
 
     if args.command == "serve":
@@ -73,6 +70,17 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.print_help()
     return 1
+
+
+def _load_index(settings, force: bool = False):
+    return build_index(
+        settings.data_dir,
+        settings.index_dir,
+        force=force,
+        manuals_dir=settings.manuals_dir,
+        embedding_backend=settings.embedding_backend,
+        embedding_model=settings.embedding_model,
+    )
 
 
 def _print_answer(question: str, history: list[dict], index, settings) -> int:

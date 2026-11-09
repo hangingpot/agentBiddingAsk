@@ -1,39 +1,29 @@
-"""问答主流程：改写 → 范围闸门 → 多路检索 → 依据生成。"""
+"""问答主流程：改写 → 范围闸门 → LangChain 检索 → stuff documents 链。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from langchain_core.documents import Document
+
+from bidding_qa.chain import CompleteFn, build_answer_chain, history_messages
 from bidding_qa.config import Settings
-from bidding_qa.dialogue import decompose, recent_history, rewrite_query
+from bidding_qa.dialogue import decompose, rewrite_query
 from bidding_qa.gate import (
     ALLOW,
     NO_EVIDENCE_TEXT,
     REFUSE_COMPLIANCE,
     REFUSE_SCOPE,
-    UNDECIDED,
     classify,
 )
-from bidding_qa.index_store import Hit, HybridIndex
-from bidding_qa.llm import CompleteFn, LLMError, LLMNotConfigured, complete
+from bidding_qa.index_store import HybridIndex
+from bidding_qa.llm import LLMError, LLMNotConfigured
+from bidding_qa.retriever import LocalHybridRetriever, document_public
+from bidding_qa.vector_store import merge_vector_hits
 
 # 绝对融合分。无关问句的最高分应低于 MIN_CONFIDENT，改写后的平台问句应高于它。
 MIN_HIT = 0.12
 MIN_CONFIDENT = 0.20
-
-SYSTEM_PROMPT = """你是「招标百问」助手，只回答中国石化物资招投标相关问题。范围限于：
-- 易派客（www.epec.com）
-- 中国石化电子招标投标交易平台，也叫电招平台（bidding.sinopec.com）
-- 中国石化物资采购电子商务平台，也叫 EC 平台（ec.sinopec.com）
-上的业务知识和平台操作。
-
-回答规则：
-1. 只使用下面给出的参考资料。资料没有写的步骤、金额、时限、电话和菜单，不要补充，直接说明知识库未覆盖。
-2. 复合问题按小问分点回答，每个小问都要能在资料中找到依据。
-3. 在使用了某条资料的句子末尾标注【资料n】，n 是资料编号。
-4. 用简洁中文，保留按钮名称、菜单路径、金额和时间。
-5. 多轮对话里的「那」「这个」指代，按已给出的历史理解，仍然只能依据资料作答。
-6. 不要输出思考过程。"""
 
 
 @dataclass
@@ -74,17 +64,26 @@ def answer_question(
 
     parts = decompose(rewritten)
     queries = [rewritten, *parts] if len(parts) > 1 else parts
-    hits = index.search_many(queries, k=settings.top_k)
-    kept = [hit for hit in hits if hit.score >= MIN_HIT]
-    confident = [hit for hit in kept if hit.score >= MIN_CONFIDENT]
+    retriever = LocalHybridRetriever(index=index, k=settings.top_k)
+    documents = merge_vector_hits(
+        retriever.retrieve_many(queries),
+        queries,
+        index_dir=settings.index_dir,
+        backend=settings.embedding_backend,
+        model=settings.embedding_model,
+        k=settings.top_k,
+        allow_new=gate.decision == ALLOW,
+    )
+    confident = [doc for doc in documents if float(doc.metadata["score"]) >= MIN_CONFIDENT]
     subqueries = parts
     if not confident:
+        kept = [doc for doc in documents if float(doc.metadata["score"]) >= MIN_HIT]
         if gate.decision == ALLOW:
             return Answer(
                 answer=NO_EVIDENCE_TEXT,
                 refused=False,
                 reason="no_evidence",
-                sources=[hit.public() for hit in kept[:3]],
+                sources=[document_public(doc) for doc in kept[:3]],
                 rewritten_query=rewritten,
                 subqueries=subqueries,
             )
@@ -98,43 +97,37 @@ def answer_question(
             subqueries=subqueries,
         )
 
-    caller = complete_fn or (lambda messages: complete(messages, settings))
-    messages = _messages(original, rewritten, history, confident, settings)
+    for rank, doc in enumerate(confident, start=1):
+        doc.metadata["n"] = rank
+    note = ""
+    if rewritten and rewritten != original:
+        note = f"结合上文后的完整问题：{rewritten}\n"
+    chain = build_answer_chain(settings, complete_fn)
     try:
-        text = caller(messages).strip()
+        text = chain.invoke(
+            {
+                "question": original,
+                "context": confident,
+                "chat_history": history_messages(history, settings.history_turns),
+                "rewrite_note": note,
+            }
+        )
     except (LLMNotConfigured, LLMError):
         raise
+    except Exception as exc:  # noqa: BLE001 — 把模型 SDK 的异常收成一句中文
+        raise LLMError(f"调用 Kimi 失败：{exc}") from exc
+    text = (text or "").strip()
     if not text:
         text = NO_EVIDENCE_TEXT
     return Answer(
         answer=text,
         refused=False,
         reason=None,
-        sources=[hit.public() for hit in confident],
+        sources=[document_public(doc) for doc in confident],
         rewritten_query=rewritten,
         subqueries=subqueries,
     )
 
 
-def _messages(
-    question: str,
-    rewritten: str,
-    history: list[dict],
-    hits: list[Hit],
-    settings: Settings,
-) -> list[dict]:
-    blocks: list[str] = []
-    for index, hit in enumerate(hits, start=1):
-        body = hit.chunk.text.strip()
-        if len(body) > 1800:
-            body = body[:1800] + "…"
-        blocks.append(f"【资料{index}】来源：{hit.chunk.source}｜{hit.chunk.title}\n{body}")
-    context = "\n\n".join(blocks)
-    user = f"参考资料：\n{context}\n\n用户原话：{question}"
-    if rewritten and rewritten != question:
-        user += f"\n结合上文后的完整问题：{rewritten}"
-    user += "\n请只依据参考资料回答用户原话。"
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(recent_history(history, settings.history_turns))
-    messages.append({"role": "user", "content": user})
-    return messages
+def confident_documents(documents: list[Document]) -> list[Document]:
+    return [doc for doc in documents if float(doc.metadata["score"]) >= MIN_CONFIDENT]

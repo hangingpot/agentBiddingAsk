@@ -80,6 +80,8 @@
     .answer { white-space: pre-wrap; }
     .sources { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px dashed var(--line); color: var(--muted); font-size: 13px; }
     .sources li { margin: 4px 0; }
+    .shots { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    .shots img { max-width: min(360px, 100%); border: 1px solid var(--line); border-radius: 8px; background: white; }
     form {
       display: flex;
       gap: 8px;
@@ -202,9 +204,12 @@
         const sources = (data.sources || []).map((item) =>
           `<li>【${escapeHtml(item.id)}】${escapeHtml(item.title)}</li>`
         ).join("");
+        const images = [...new Set((data.sources || []).flatMap((item) => item.images || []))];
+        const shots = images.map((src) => `<img alt="手册截图" src="${escapeHtml(src)}" />`).join("");
         const sourceBlock = sources ? `<ol class="sources">${sources}</ol>` : "";
+        const shotBlock = shots ? `<div class="shots">${shots}</div>` : "";
         pending.classList.toggle("refused", data.refused);
-        pending.innerHTML = `<div class="who">招标百问</div>${label}<div class="answer">${escapeHtml(data.answer)}</div>${sourceBlock}`;
+        pending.innerHTML = `<div class="who">招标百问</div>${label}<div class="answer">${escapeHtml(data.answer)}</div>${shotBlock}${sourceBlock}`;
         history.push({ role: "user", content: message });
         history.push({ role: "assistant", content: data.answer });
       } catch (error) {
