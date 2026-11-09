@@ -13,3 +13,4 @@ doc/
 dist/
 build/
 .DS_Store
+.codegraph
