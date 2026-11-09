@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>招标百问</title>
+  <style>
+    :root {
+      --paper: #f3efe6;
+      --ink: #1d1a16;
+      --muted: #6d645a;
+      --line: #ddd4c6;
+      --seal: #8e2a2a;
+      --card: #fffdf8;
+      --ok: #1f4d3a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      color: var(--ink);
+      background:
+        radial-gradient(1200px 400px at 10% -10%, #efe4d2 0%, transparent 55%),
+        var(--paper);
+      font: 16px/1.65 "Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header, main, footer { width: min(880px, calc(100% - 32px)); margin: 0 auto; }
+    main { flex: 1; display: flex; flex-direction: column; }
+    header { padding: 36px 0 8px; }
+    .mark {
+      display: inline-block;
+      color: var(--seal);
+      letter-spacing: 0.18em;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    h1 {
+      margin: 6px 0 0;
+      font-family: "Songti SC", "STSong", "Noto Serif SC", serif;
+      font-size: 40px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+    }
+    .sub { margin: 8px 0 0; color: var(--muted); }
+    .examples { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 0; }
+    button.chip, button.send, button.clear {
+      font: inherit;
+      cursor: pointer;
+    }
+    button.chip {
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--ink);
+      border-radius: 999px;
+      padding: 4px 12px;
+    }
+    button.chip:hover { border-color: var(--seal); color: var(--seal); }
+    #log {
+      margin: 22px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      flex: 1;
+    }
+    .bubble {
+      max-width: 100%;
+      padding: 12px 14px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+    }
+    .bubble.user { align-self: flex-end; background: #1d1a16; color: #f6f1e8; border-color: #1d1a16; max-width: min(640px, 100%); }
+    .bubble.assistant { align-self: flex-start; max-width: min(720px, 100%); }
+    .bubble .who { font-size: 12px; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
+    .bubble.user .who { color: #c8bfb2; }
+    .bubble.refused { border-color: #e2c2b4; }
+    .tag { color: var(--seal); font-size: 12px; font-weight: 700; }
+    .answer { white-space: pre-wrap; }
+    .sources { margin: 10px 0 0; padding: 8px 0 0; border-top: 1px dashed var(--line); color: var(--muted); font-size: 13px; }
+    .sources li { margin: 4px 0; }
+    form {
+      display: flex;
+      gap: 8px;
+      padding: 8px 0 12px;
+    }
+    textarea {
+      flex: 1;
+      resize: vertical;
+      min-height: 56px;
+      max-height: 160px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      font: inherit;
+      color: inherit;
+    }
+    textarea:focus { outline: 2px solid #e4c1b6; border-color: var(--seal); }
+    button.send, button.clear {
+      border: 0;
+      border-radius: 12px;
+      padding: 0 16px;
+    }
+    @media (max-width: 640px) {
+      form { flex-wrap: wrap; }
+      textarea { flex-basis: 100%; }
+      button.send, button.clear { height: 44px; flex: 1; }
+    }
+    button.send { background: var(--seal); color: white; }
+    button.clear { background: transparent; border: 1px solid var(--line); color: var(--muted); }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    footer { margin-bottom: 28px; color: var(--muted); font-size: 13px; }
+    .status { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="mark">易派客 · 电招 · EC</div>
+    <h1>招标百问</h1>
+    <p class="sub">根据百问榜回答会员、投标、CA、费用和平台操作。范围外的问题会直接说明。带「那」的例句，请接在上一问后面发送。</p>
+    <div class="examples" id="examples"></div>
+  </header>
+  <main>
+    <div id="log" aria-live="polite"></div>
+    <form id="form">
+      <label class="sr" for="box" style="position:absolute;left:-999px">问题</label>
+      <textarea id="box" placeholder="例如：投标用 CA 的初始密码是什么？过期超过 6 个月怎么处理？" required></textarea>
+      <button class="clear" type="button" id="clear">清空</button>
+      <button class="send" type="submit" id="send">提问</button>
+    </form>
+  </main>
+  <footer>
+    <span id="health">正在检查索引…</span>
+    回答只依据已索引资料，不替代招标文件。
+  </footer>
+  <script>
+    const examples = [
+      "如何成为易派客平台会员？",
+      "投标用CA数字证书的初始密码是什么？过期超过6个月怎么处理？",
+      "那续签费用是多少？",
+      "今天北京天气怎么样？",
+      "怎么串标才能中标？"
+    ];
+    const log = document.querySelector("#log");
+    const box = document.querySelector("#box");
+    const form = document.querySelector("#form");
+    const send = document.querySelector("#send");
+    const history = [];
+
+    document.querySelector("#examples").innerHTML = examples.map(
+      (text) => `<button class="chip" type="button">${text}</button>`
+    ).join("");
+    document.querySelector("#examples").addEventListener("click", (event) => {
+      if (event.target.matches("button")) {
+        box.value = event.target.textContent;
+        box.focus();
+      }
+    });
+
+    function add(role, html) {
+      const node = document.createElement("div");
+      node.className = `bubble ${role}`;
+      node.innerHTML = html;
+      log.appendChild(node);
+      node.scrollIntoView({ block: "nearest" });
+      return node;
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/[&<>"']/g, (ch) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[ch]));
+    }
+
+    document.querySelector("#clear").addEventListener("click", () => {
+      history.length = 0;
+      log.innerHTML = "";
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = box.value.trim();
+      if (!message) return;
+      add("user", `<div class="who">提问</div><div class="answer">${escapeHtml(message)}</div>`);
+      box.value = "";
+      send.disabled = true;
+      const pending = add("assistant", `<div class="who">招标百问</div><div class="answer">正在检索…</div>`);
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, history })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          pending.innerHTML = `<div class="who">招标百问</div><div class="answer">${escapeHtml(data.detail || "请求失败")}</div>`;
+          return;
+        }
+        const label = data.refused ? `<div class="tag">${data.reason === "non_compliant" ? "不能协助" : "超出范围"}</div>` : "";
+        const sources = (data.sources || []).map((item) =>
+          `<li>【${escapeHtml(item.id)}】${escapeHtml(item.title)}</li>`
+        ).join("");
+        const sourceBlock = sources ? `<ol class="sources">${sources}</ol>` : "";
+        pending.classList.toggle("refused", data.refused);
+        pending.innerHTML = `<div class="who">招标百问</div>${label}<div class="answer">${escapeHtml(data.answer)}</div>${sourceBlock}`;
+        history.push({ role: "user", content: message });
+        history.push({ role: "assistant", content: data.answer });
+      } catch (error) {
+        pending.innerHTML = `<div class="who">招标百问</div><div class="answer">网络错误：${escapeHtml(String(error))}</div>`;
+      } finally {
+        send.disabled = false;
+        box.focus();
+      }
+    });
+
+    fetch("/api/health").then((res) => res.json()).then((data) => {
+      const node = document.querySelector("#health");
+      if (data.status === "ok") {
+        node.className = "status";
+        node.textContent = `已索引 ${data.chunks} 条。模型 ${data.model}。${data.llm_configured ? "密钥已配置。" : "尚未配置 Kimi 密钥，平台问题暂不能生成回答。"}`;
+      } else {
+        node.textContent = data.detail || "索引不可用";
+      }
+    }).catch(() => {
+      document.querySelector("#health").textContent = "健康检查失败";
+    });
+  </script>
+</body>
+</html>
