@@ -32,10 +32,15 @@ class Settings:
     reasoning_effort: str
     max_completion_tokens: int
     embedding_backend: str
-    data_dir: Path
-    index_dir: Path
-    top_k: int
-    history_turns: int
+    embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    data_dir: Path = PROJECT_ROOT / "data"
+    manuals_dir: Path | None = None
+    index_dir: Path = PROJECT_ROOT / "storage" / "index"
+    top_k: int = 5
+    history_turns: int = 6
+    ocr_backend: str = "rapidocr"
+    vision_caption: str = "off"
+    parser_backend: str = "builtin"
 
     @property
     def llm_configured(self) -> bool:
@@ -69,9 +74,25 @@ def load_settings() -> Settings:
         or "kimi-k3.1-pro-highspeed",
         reasoning_effort=effort,
         max_completion_tokens=max(256, min(max_tokens, 8192)),
-        embedding_backend=os.getenv("EMBEDDING_BACKEND", "local").strip().lower() or "local",
+        embedding_backend=os.getenv("EMBEDDING_BACKEND", "fastembed").strip().lower() or "fastembed",
+        embedding_model=os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5").strip()
+        or "BAAI/bge-small-zh-v1.5",
         data_dir=_path("DATA_DIR", "data"),
+        manuals_dir=_manuals_dir(),
         index_dir=_path("INDEX_DIR", "storage/index"),
         top_k=top_k,
         history_turns=history_turns,
+        ocr_backend=os.getenv("OCR_BACKEND", "rapidocr").strip().lower() or "rapidocr",
+        vision_caption=os.getenv("VISION_CAPTION", "off").strip().lower() or "off",
+        parser_backend=os.getenv("PARSER_BACKEND", "builtin").strip().lower() or "builtin",
     )
+
+
+def _manuals_dir() -> Path | None:
+    raw = os.getenv("MANUALS_DIR", "").strip()
+    if raw:
+        return _path("MANUALS_DIR", raw)
+    for candidate in (PROJECT_ROOT / "data" / "manuals", PROJECT_ROOT / "doc" / "6.最新操作手册"):
+        if candidate.is_dir():
+            return candidate
+    return None

@@ -7,6 +7,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 storage/
+data/manuals/
+doc/
 *.egg-info/
 dist/
 build/

@@ -225,18 +225,38 @@ def load_chunks(index_dir: Path) -> tuple[list[Chunk], str]:
     return chunks, str(manifest.get("fingerprint", ""))
 
 
-def build_index(data_dir: Path, index_dir: Path, force: bool = False) -> HybridIndex:
-    """语料有变化时重建 chunks.jsonl，并在内存中拟合向量。"""
-    current = fingerprint(data_dir)
+def build_index(
+    data_dir: Path,
+    index_dir: Path,
+    force: bool = False,
+    manuals_dir: Path | None = None,
+    embedding_backend: str = "lexical",
+    embedding_model: str = "",
+    assets_dir: Path | None = None,
+) -> HybridIndex:
+    """语料有变化时重建字面索引，并按配置写入 Chroma。"""
+    from bidding_qa.embeddings import normalize_backend, uses_vector_store
+    from bidding_qa.vector_store import build_chroma, chroma_ready
+
+    extra = [manuals_dir] if manuals_dir else None
+    assets = assets_dir or (Path(index_dir) / "assets")
+    backend = normalize_backend(embedding_backend) if embedding_backend not in {"", "lexical"} else "lexical"
+    token = f"{fingerprint(data_dir, extra)}:{backend}:{embedding_model}"
     if not force:
         try:
             chunks, saved = load_chunks(index_dir)
-            if saved == current and chunks:
-                logger.info("使用已有索引，%s 条", len(chunks))
+            if saved == token and chunks:
+                if not uses_vector_store(backend) or chroma_ready(index_dir, backend, embedding_model):
+                    logger.info("使用已有索引，%s 条", len(chunks))
+                    return HybridIndex(chunks)
+                logger.info("字面索引可复用，正在补建向量库")
+                build_chroma(chunks, index_dir, backend, embedding_model)
                 return HybridIndex(chunks)
         except FileNotFoundError:
             pass
-    chunks = load_corpus(data_dir)
-    save_chunks(chunks, index_dir, current)
+    chunks = load_corpus(data_dir, extra, assets_dir=assets)
+    save_chunks(chunks, index_dir, token)
+    if build_chroma(chunks, index_dir, backend, embedding_model):
+        logger.info("向量库与字面索引已对齐")
     logger.info("已索引 %s 条片段", len(chunks))
     return HybridIndex(chunks)
